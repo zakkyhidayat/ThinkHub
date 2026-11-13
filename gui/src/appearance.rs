@@ -21,12 +21,23 @@ pub enum Theme {
     Dark,
     Light,
 }
+/// Where the accent comes from: the desktop's accent colour, or ThinkHub's own choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccentSource {
+    #[default]
+    System,
+    Custom,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Appearance {
     pub schema_version: u32,
     pub theme: Theme,
     pub accent: String,
+    /// Stored in a sibling file so appearance.json stays readable by older ThinkHub builds.
+    #[serde(skip)]
+    pub accent_source: AccentSource,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -34,6 +45,7 @@ impl Default for Appearance {
             schema_version: 1,
             theme: Theme::Dark,
             accent: PRESETS[0].1.into(),
+            accent_source: AccentSource::System,
         }
     }
 }
@@ -45,6 +57,14 @@ impl Appearance {
         rgb(&self.accent).map(|_| ())
     }
     pub fn css(&self) -> String {
+        self.build_css(&self.accent, None)
+    }
+    /// Same stylesheet around the desktop's own accent. Adwaita's accents are designed for
+    /// white foreground text, so that is used instead of the computed black-or-white choice.
+    pub fn css_with_system_accent(&self, accent: &str) -> String {
+        self.build_css(accent, Some("#ffffff"))
+    }
+    fn build_css(&self, accent: &str, ink_override: Option<&str>) -> String {
         let palette = match self.theme {
             Theme::Dark => [
                 "#111315", "#ededee", "#191b1e", "#353940", "#aeb3bc", "#292c31", "#2c2e32",
@@ -74,12 +94,14 @@ impl Appearance {
         for (n, v) in names.into_iter().zip(palette) {
             css.push_str(&format!("@define-color {n} {v};\n"));
         }
-        let base = rgb(&self.accent).unwrap_or([217, 35, 59]);
-        let ink = if contrast(base, [255; 3]) >= contrast(base, [0; 3]) {
-            "#ffffff"
-        } else {
-            "#000000"
-        };
+        let base = rgb(accent).unwrap_or([217, 35, 59]);
+        let ink = ink_override.unwrap_or(
+            if contrast(base, [255; 3]) >= contrast(base, [0; 3]) {
+                "#ffffff"
+            } else {
+                "#000000"
+            },
+        );
         let surface = rgb(palette[if self.theme == Theme::Dark { 8 } else { 6 }]).unwrap();
         let toward = if self.theme == Theme::Dark {
             [255; 3]
@@ -179,7 +201,26 @@ pub fn load(path: &Path) -> Result<Appearance, String> {
     let value: Appearance = serde_json::from_slice(&bytes)
         .map_err(|e| format!("Cannot read appearance settings: {e}"))?;
     value.validate()?;
+    let mut value = value;
+    value.accent_source = load_source(path);
     Ok(value)
+}
+fn source_path(path: &Path) -> PathBuf {
+    path.with_file_name("accent-source")
+}
+fn load_source(path: &Path) -> AccentSource {
+    let file = source_path(path);
+    if file
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink() || !m.is_file())
+    {
+        return AccentSource::default();
+    }
+    let mut text = String::new();
+    match fs::File::open(&file).and_then(|f| f.take(16).read_to_string(&mut text)) {
+        Ok(_) if text.trim() == "custom" => AccentSource::Custom,
+        _ => AccentSource::System,
+    }
 }
 pub fn save(path: &Path, value: &Appearance) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
@@ -205,6 +246,15 @@ pub fn save(path: &Path, value: &Appearance) -> Result<(), String> {
         .and_then(|_| temporary.as_file().sync_all())
         .map_err(|e| e.to_string())?;
     temporary.persist(path).map_err(|e| e.to_string())?;
+    let mut source = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    source
+        .write_all(match value.accent_source {
+            AccentSource::System => b"system\n".as_slice(),
+            AccentSource::Custom => b"custom\n".as_slice(),
+        })
+        .and_then(|_| source.as_file().sync_all())
+        .map_err(|e| e.to_string())?;
+    source.persist(source_path(path)).map_err(|e| e.to_string())?;
     Ok(())
 }
 #[cfg(test)]
@@ -245,6 +295,26 @@ mod tests {
         assert!(load(&path).is_err());
         fs::write(&path, "x".repeat(20_000)).unwrap();
         assert!(load(&path).is_err());
+    }
+    #[test]
+    fn old_files_without_an_accent_source_follow_the_system_accent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("thinkhub/appearance.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r##"{"schema_version":1,"theme":"dark","accent":"#d9233b"}"##,
+        )
+        .unwrap();
+        assert_eq!(load(&path).unwrap().accent_source, AccentSource::System);
+        let custom = Appearance {
+            accent_source: AccentSource::Custom,
+            ..Appearance::default()
+        };
+        save(&path, &custom).unwrap();
+        assert_eq!(load(&path).unwrap().accent_source, AccentSource::Custom);
+        // Older builds deny unknown fields, so the main file must not carry the new one.
+        assert!(!fs::read_to_string(&path).unwrap().contains("accent_source"));
     }
     #[test]
     fn readable_accents_in_both_themes() {

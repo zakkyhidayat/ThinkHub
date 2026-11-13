@@ -6,9 +6,12 @@
 
 **Your ThinkPad, at a glance.** A native Rust dashboard for monitoring and managing ThinkPad laptops on Linux.
 
-ThinkHub brings battery health, temperatures, fan speed, hardware information and supported controls into one GTK4 app. It discovers the interfaces your laptop actually exposes and explains unavailable features or conflicts with other tools. Choose a light or dark theme and make it yours with accent colors.
+ThinkHub brings battery health, temperatures, fan speed, hardware information and supported controls into one GTK4 and libadwaita app that follows the GNOME design language. It discovers the interfaces your laptop actually exposes and explains unavailable features or conflicts with other tools. Choose a light or dark theme and make it yours with accent colors.
 
-![ThinkHub Overview running on a ThinkPad T480 with CachyOS](docs/images/overview.png)
+<p align="center">
+  <img src="docs/images/overview-light.png" width="48%" alt="ThinkHub Overview, light theme">
+  <img src="docs/images/overview-dark.png" width="48%" alt="ThinkHub Overview, dark theme">
+</p>
 
 **Public preview — v0.5.1-preview.1.** Tested locally on a ThinkPad T480 running CachyOS. Support depends on the model, Linux kernel, firmware and installed services. This release does **not** promise that every feature works on every ThinkPad. See the [compatibility record](docs/COMPATIBILITY.md).
 
@@ -37,12 +40,23 @@ Open **ThinkHub** from your app launcher after installation, or run `thinkhub` a
 - **Display & input:** backlight and keyboard-light controls, connector/input information and verified PS/2 TrackPoint parameters. Hyprland can also supply current output details.
 - **Firmware:** allowlisted BIOS information, fwupd inventory and an experimental, guarded BIOS update preparation workflow for supported LVFS releases.
 - **Preferences & diagnostics:** save preferences, inspect blockers and review change previews. Saving a preference never silently changes hardware.
-- **Feedback:** review a message to `info.thinkhub@protonmail.com` and open it in your email app, with optional system details and a copy fallback. See [the feedback workflow](docs/FEEDBACK.md).
-- **Customize:** light/dark themes, eight accent presets and a custom color picker, remembered across launches.
+- **Feedback:** open **Send Feedback…** from the main menu, review a message to `info.thinkhub@protonmail.com` and open it in your email app, with optional system details and a copy fallback. See [the feedback workflow](docs/FEEDBACK.md).
+- **Customize:** light/dark themes and an accent that either follows your desktop's accent color or uses one of eight presets or a custom color, remembered across launches.
+- **Search and shortcuts:** filter pages from the search button (Ctrl+F), jump with Alt+1…7, refresh with F5, and see every shortcut in the main menu.
 
-![ThinkHub Customize page](docs/images/customize.png)
+<p align="center">
+  <img src="docs/images/customize-dark.png" width="48%" alt="Customize: theme and accent color">
+  <img src="docs/images/menu.png" width="48%" alt="Main menu: feedback, issue reporting, shortcuts and About">
+</p>
 
-![ThinkHub Feedback tab](docs/images/feedback.png)
+The window adapts to narrow sizes like GNOME Settings: below 600 px it shows the page list or one page at a time.
+
+<p align="center">
+  <img src="docs/images/compact-list.png" width="30%" alt="Compact layout: page list">
+  <img src="docs/images/compact-page.png" width="30%" alt="Compact layout: Batteries page">
+  <img src="docs/images/about.png" width="30%" alt="About dialog">
+</p>
+
 
 No telemetry, account or cloud service is required. Normal monitoring reads local data. Firmware catalog refresh/download and explicitly requested system integrations use the relevant system services. Missing readings stay unavailable instead of being guessed.
 
@@ -56,7 +70,7 @@ Manual fan curves, BIOS editing, automatic startup/resume application, general d
 
 ## Build and contribute
 
-Requires Linux, **Rust 1.85+**, a C toolchain and GTK4 development libraries. Use the [distro-specific source-build instructions](docs/INSTALL.md#build-from-source).
+Requires Linux, **Rust 1.85+**, a C toolchain, GTK4 and **libadwaita 1.8+** development libraries. Use the [distro-specific source-build instructions](docs/INSTALL.md#build-from-source).
 
 ```sh
 cargo test --locked

@@ -101,26 +101,25 @@ fn label(text: &str, class: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_xalign(0.0);
     label.set_wrap(true);
-    label.add_css_class(class);
+    label.add_css_class(crate::adwaita_class(class));
     label
 }
 
 pub fn page(
-    parent: &gtk::ApplicationWindow,
+    parent: &adw::ApplicationWindow,
     draft: Rc<RefCell<Draft>>,
     snapshot: Value,
 ) -> gtk::Box {
     let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    form.add_css_class("card");
     form.append(&label("Help improve ThinkHub", "card-title"));
     form.append(&label(&format!("Feedback goes to {RECIPIENT}. Review your message here, then send it from your email app."), "muted"));
-    form.append(&label("Feedback type", "muted"));
+    form.append(&label("Feedback type", "field"));
     let category = gtk::DropDown::from_strings(&CATEGORIES);
     category.set_selected(draft.borrow().category);
     form.append(&category);
     let saved = draft.clone();
     category.connect_selected_notify(move |widget| saved.borrow_mut().category = widget.selected());
-    form.append(&label("Subject", "muted"));
+    form.append(&label("Subject", "field"));
     let subject = gtk::Entry::builder()
         .placeholder_text("What would you like to tell us?")
         .max_length(120)
@@ -129,7 +128,7 @@ pub fn page(
     form.append(&subject);
     let saved = draft.clone();
     subject.connect_changed(move |widget| saved.borrow_mut().subject = widget.text().to_string());
-    form.append(&label("Message", "muted"));
+    form.append(&label("Message", "field"));
     let message = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(10)
@@ -142,6 +141,7 @@ pub fn page(
         .min_content_height(170)
         .child(&message)
         .build();
+    scroll.add_css_class("card");
     form.append(&scroll);
     let count = label(
         &format!(
@@ -194,7 +194,7 @@ pub fn page(
     form
 }
 
-fn review_window(parent: &gtk::ApplicationWindow, prepared: Prepared) {
+fn review_window(parent: &adw::ApplicationWindow, prepared: Prepared) {
     let window = gtk::Window::builder()
         .title("Review feedback")
         .transient_for(parent)

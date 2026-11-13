@@ -10,6 +10,7 @@ repository = "https://github.com/marioyordanov20039-debug/ThinkHub"
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.10", default-features = false }
+adw = { package = "libadwaita", version = "0.8", features = ["v1_8"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"

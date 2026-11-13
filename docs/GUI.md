@@ -23,11 +23,16 @@ and the system's polkit prompt. No AppImage or background daemon is installed.
 Development dependencies: a Rust compiler, C linker, pkg-config and GTK4 development files.
 Typical package names are `build-essential pkg-config libgtk-4-dev` on Debian/Ubuntu,
 `gcc pkgconf-pkg-config gtk4-devel libglvnd-gles mesa-dri-drivers` on Fedora and `base-devel pkgconf gtk4` on Arch.
+The interface also needs the libadwaita development package (`libadwaita-1-dev`, `libadwaita-devel`, `libadwaita`),
+version 1.8 or newer as built today.
 These are instructions for future testing, not evidence of validation on those systems.
 Native preview packages and source installation are documented in [INSTALL.md](INSTALL.md).
 
-The initial layout has Overview, Batteries, Power & thermals, Display & input, Firmware,
-Preferences & diagnostics, Customize, and Feedback pages. Live snapshots are read on a worker thread every five
+The layout follows the GNOME Settings pattern: a sidebar with search and a main menu, and a content
+area with grouped rows. The pages are Overview, Batteries, Power & thermals, Display & input, Firmware,
+Preferences & diagnostics, and Customize. The main menu holds Send Feedback…, Report an Issue,
+Keyboard Shortcuts and About. Below 600 px the window shows the page list or one page at a time.
+Shortcuts: Ctrl+F search, F5 refresh, Alt+1…7 pages, Ctrl+? shortcuts, Ctrl+W close. Live snapshots are read on a worker thread every five
 seconds. GTK stays on the main thread. Editors retain drafts between refreshes, unless
 hardware identity or control ownership changes. Failed reads mark displayed data as stale
 and prevent actions until a successful refresh. Device changes recreate affected editors.
@@ -39,15 +44,16 @@ power service's policy and hold checks. Firmware scans are explicit, read-only c
 information; empty results do not mean firmware is current. Preferences have ordinary
 form fields; saving never applies hardware settings or adds startup automation.
 
-Customize offers dark/light themes, eight accent presets, a custom color picker and reset to
-defaults. Appearance changes apply live without rebuilding hardware editors and are saved
+Customize offers dark/light themes, an accent that follows the desktop's accent color or uses one of
+eight presets or a custom color, and reset to defaults. The accent source is stored next to
+`appearance.json` (in `accent-source`) so older builds can still read the main file. Appearance changes apply live without rebuilding hardware editors and are saved
 atomically to `$XDG_CONFIG_HOME/thinkhub/appearance.json` (normally
 `~/.config/thinkhub/appearance.json`). This is separate from backend power preferences and
 does not alter the desktop theme. Accent text and button foregrounds adapt for contrast.
 Malformed or unsupported settings fall back to defaults with an explanation in Customize;
 save failures leave a live preview and an explicit error. Customize works even without the backend.
 
-Read-only visual smoke check (navigate all eight native pages and export their rendered window):
+Read-only visual smoke check (navigate the native pages and export their rendered window):
 
 ```sh
 THINKPAD_DASHBOARD_CAPTURE_DIR=/absolute/output/directory gui/target/release/thinkhub
@@ -78,5 +84,15 @@ raw firmware flashing or automatic startup application. Supported BIOS preparati
 the [fwupd workflow](BIOS_UPDATES.md), with warning, acknowledgement and system authorization;
 physical flashing/reboot has not been tested. This preview is released with those limits documented.
 
-The [Feedback tab](FEEDBACK.md) opens reviewed email drafts addressed to info.thinkhub@protonmail.com.
+The **Send Feedback…** dialog in the main menu ([workflow](FEEDBACK.md)) opens reviewed email drafts addressed to info.thinkhub@protonmail.com.
 It also works without the hardware backend. Sending remains an explicit action in the user’s email app.
+
+Developer checks, run with an isolated `XDG_CONFIG_HOME` because they save appearance choices:
+
+```sh
+# Drives every action and control (menu, search, shortcuts, dialogs, Customize, compact layout).
+# It never presses an Apply button and never opens an email draft.
+THINKHUB_SELFTEST=1 gui/target/release/thinkhub
+# Renders light/dark in compact, windowed and fullscreen, with the menu and dialogs open.
+THINKHUB_SHOTS=/absolute/output/directory gui/target/release/thinkhub
+```

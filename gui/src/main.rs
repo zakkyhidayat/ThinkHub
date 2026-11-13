@@ -1,7 +1,10 @@
 //! Unprivileged native frontend. All mutations go through the installed CLI.
 mod appearance;
 mod feedback;
-use gtk::{glib, prelude::*};
+mod selftest;
+mod shots;
+use adw::prelude::*;
+use gtk::{gio, glib};
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -19,6 +22,16 @@ const CLI: &str = match option_env!("THINKHUB_CLI_PATH") {
     Some(path) => path,
     None => "/usr/local/bin/thinkpad-dashboard",
 };
+const NAV_ICONS: [&str; 8] = [
+    "computer-symbolic",
+    "battery-full-symbolic",
+    "power-profile-balanced-symbolic",
+    "video-display-symbolic",
+    "software-update-available-symbolic",
+    "preferences-system-symbolic",
+    "preferences-desktop-appearance-symbolic",
+    "mail-send-symbolic",
+];
 const PAGES: [&str; 8] = [
     "Overview",
     "Batteries",
@@ -44,7 +57,7 @@ struct Ui {
     appearance: RefCell<appearance::Appearance>,
     appearance_error: RefCell<Option<String>>,
     feedback: Rc<RefCell<feedback::Draft>>,
-    window: gtk::ApplicationWindow,
+    window: adw::ApplicationWindow,
     content: gtk::Box,
     status: gtk::Label,
     data: RefCell<Value>,
@@ -59,32 +72,55 @@ struct Ui {
     bios_spinner: gtk::Spinner,
     tx: mpsc::Sender<Event>,
     nav: Vec<gtk::Button>,
+    content_page: adw::NavigationPage,
 }
 
 fn main() -> glib::ExitCode {
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build);
     app.run()
 }
 
-fn configure_theme(theme: appearance::Theme) {
-    let settings = gtk::Settings::default().unwrap();
-    if let Some(property) = settings.find_property("gtk-interface-color-scheme") {
-        if let Some(value) = glib::EnumClass::with_type(property.value_type()).and_then(|c| {
-            c.to_value_by_nick(if theme == appearance::Theme::Dark {
-                "dark"
-            } else {
-                "light"
-            })
-        }) {
-            settings.set_property_from_value("gtk-interface-color-scheme", &value);
+/// Stylesheet for the saved appearance, using the desktop accent when so configured.
+fn appearance_css(value: &appearance::Appearance) -> String {
+    match value.accent_source {
+        appearance::AccentSource::Custom => value.css(),
+        appearance::AccentSource::System => {
+            let c = adw::StyleManager::default().accent_color_rgba();
+            let hex = format!(
+                "#{:02x}{:02x}{:02x}",
+                (c.red() * 255.).round() as u8,
+                (c.green() * 255.).round() as u8,
+                (c.blue() * 255.).round() as u8
+            );
+            value.css_with_system_accent(&hex)
         }
-    } else {
-        settings.set_gtk_application_prefer_dark_theme(theme == appearance::Theme::Dark);
     }
 }
 
-fn build(app: &gtk::Application) {
+fn configure_theme(theme: appearance::Theme) {
+    let dark = theme == appearance::Theme::Dark;
+    // Adwaita's style manager owns light/dark; ThinkHub's saved choice maps onto it.
+    adw::StyleManager::default().set_color_scheme(if dark {
+        adw::ColorScheme::ForceDark
+    } else {
+        adw::ColorScheme::ForceLight
+    });
+    // Also set GTK's own scheme so prefers-color-scheme rules follow the same choice.
+    if let Some(settings) = gtk::Settings::default() {
+        if let Some(property) = settings.find_property("gtk-interface-color-scheme") {
+            if let Some(value) = glib::EnumClass::with_type(property.value_type())
+                .and_then(|c| c.to_value_by_nick(if dark { "dark" } else { "light" }))
+            {
+                settings.set_property_from_value("gtk-interface-color-scheme", &value);
+            }
+        } else {
+            settings.set_gtk_application_prefer_dark_theme(dark);
+        }
+    }
+}
+
+fn build(app: &adw::Application) {
     if let Some(window) = app.active_window() {
         window.present();
         return;
@@ -94,69 +130,182 @@ fn build(app: &gtk::Application) {
     let appearance = loaded_appearance.unwrap_or_default();
     configure_theme(appearance.theme);
     let css = gtk::CssProvider::new();
-    css.load_from_data(&appearance.css());
+    css.load_from_data(&appearance_css(&appearance));
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().unwrap(),
         &css,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    let window = gtk::ApplicationWindow::builder()
+    let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("ThinkHub")
         .default_width(1120)
         .default_height(780)
         .build();
     window.set_icon_name(Some(APP_ID));
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    body.set_vexpand(true);
+    // GNOME Settings layout: a split view whose sidebar and content each own a header bar.
+    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+    refresh.set_tooltip_text(Some("Refresh live data (F5)"));
+    let search_toggle = gtk::ToggleButton::new();
+    search_toggle.set_icon_name("system-search-symbolic");
+    search_toggle.set_tooltip_text(Some("Search (Ctrl+F)"));
+    let app_menu = gio::Menu::new();
+    let feedback_section = gio::Menu::new();
+    feedback_section.append(Some("Send Feedback…"), Some("win.feedback"));
+    feedback_section.append(Some("Report an Issue"), Some("win.report-issue"));
+    app_menu.append_section(None, &feedback_section);
+    let help_section = gio::Menu::new();
+    help_section.append(Some("Keyboard Shortcuts"), Some("win.show-help-overlay"));
+    help_section.append(Some("About ThinkHub"), Some("win.about"));
+    app_menu.append_section(None, &help_section);
+    let menu_button = gtk::MenuButton::new();
+    menu_button.set_icon_name("open-menu-symbolic");
+    menu_button.set_menu_model(Some(&app_menu));
+    menu_button.set_tooltip_text(Some("Main menu"));
+    let side_header = adw::HeaderBar::new();
+    side_header.set_show_end_title_buttons(false);
+    side_header.pack_start(&search_toggle);
+    side_header.pack_end(&menu_button);
+    side_header.set_title_widget(Some(&adw::WindowTitle::new("ThinkHub", "")));
+    let search_entry = gtk::SearchEntry::new();
+    search_entry.set_placeholder_text(Some("Search ThinkHub"));
+    search_entry.set_hexpand(true);
+    let search_bar = gtk::SearchBar::new();
+    search_bar.set_child(Some(&search_entry));
+    search_bar.connect_entry(&search_entry);
+    search_toggle
+        .bind_property("active", &search_bar, "search-mode-enabled")
+        .bidirectional()
+        .sync_create()
+        .build();
+    search_bar.set_key_capture_widget(Some(&window));
+    // Typing must not reach the sidebar search while a dialog (About, Shortcuts…) is open.
+    let capture_bar = search_bar.clone();
+    window.connect_visible_dialog_notify(move |window| {
+        if window.visible_dialog().is_some() {
+            capture_bar.set_key_capture_widget(None::<&gtk::Widget>);
+        } else {
+            capture_bar.set_key_capture_widget(Some(window));
+        }
+    });
+    // Like GNOME Settings: opening search puts the cursor straight into the entry.
+    let focus_entry = search_entry.clone();
+    search_toggle.connect_toggled(move |toggle| {
+        if toggle.is_active() {
+            focus_entry.grab_focus();
+        }
+    });
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 8);
     sidebar.add_css_class("sidebar");
-    sidebar.set_width_request(220);
-    let brand = label("ThinkHub", "brand");
-    sidebar.append(&brand);
-    sidebar.append(&label("Y O U R   T H I N K P A D", "accent"));
-    let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    spacer.set_height_request(22);
-    sidebar.append(&spacer);
     let mut nav = vec![];
     for name in PAGES {
-        let b = gtk::Button::with_label(name);
+        let text = gtk::Label::new(Some(name));
+        text.set_xalign(0.0);
+        let item = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        item.append(&gtk::Image::from_icon_name(NAV_ICONS[nav.len()]));
+        item.append(&text);
+        let b = gtk::Button::new();
+        b.set_child(Some(&item));
+        b.add_css_class("flat");
         b.set_halign(gtk::Align::Fill);
         sidebar.append(&b);
         nav.push(b);
     }
+    // Search filters the sidebar by page name and the topics each page covers.
+    let search_nav = nav.clone();
+    search_entry.connect_search_changed(move |entry| {
+        let query = entry.text().to_lowercase();
+        for (i, b) in search_nav.iter().enumerate() {
+            if i == FEEDBACK_PAGE {
+                continue;
+            }
+            let haystack = format!("{} {}", PAGES[i], PAGE_KEYWORDS[i]).to_lowercase();
+            b.set_visible(query.split_whitespace().all(|word| haystack.contains(word)));
+        }
+    });
+    let search_nav = nav.clone();
+    search_entry.connect_activate(move |_| {
+        if let Some(first) = search_nav.iter().find(|b| b.is_visible()) {
+            first.emit_clicked();
+        }
+    });
+    // Feedback lives in the primary menu as a dialog, not in the page list.
+    nav[FEEDBACK_PAGE].set_visible(false);
     let spring = gtk::Box::new(gtk::Orientation::Vertical, 0);
     spring.set_vexpand(true);
     sidebar.append(&spring);
-    sidebar.append(&label(
-        &format!("Linux preview · {}", env!("CARGO_PKG_VERSION")),
-        "muted",
-    ));
-    let refresh = gtk::Button::with_label("Refresh live data");
-    sidebar.append(&refresh);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
     content.add_css_class("page");
     content.set_hexpand(true);
+    let clamp = adw::Clamp::builder()
+        .maximum_size(600)
+        .tightening_threshold(400)
+        .child(&content)
+        .build();
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .hexpand(true)
-        .child(&content)
+        .overlay_scrolling(true)
+        .child(&clamp)
         .build();
-    body.append(&sidebar);
-    body.append(&scroll);
     let status = label("Connecting to the local backend…", "status");
-    status.remove_css_class("status");
     let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     status_bar.add_css_class("status");
     let bios_spinner = gtk::Spinner::new();
     bios_spinner.set_visible(false);
     status_bar.append(&bios_spinner);
     status_bar.append(&status);
-    root.append(&body);
-    root.append(&status_bar);
-    window.set_child(Some(&root));
+    let sidebar_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .overlay_scrolling(true)
+        .child(&sidebar)
+        .build();
+    let side_toolbar = adw::ToolbarView::new();
+    side_toolbar.add_css_class("sidebar-edge");
+    side_toolbar.add_top_bar(&side_header);
+    side_toolbar.add_top_bar(&search_bar);
+    side_toolbar.set_content(Some(&sidebar_scroll));
+    let content_header = adw::HeaderBar::new();
+    content_header.pack_end(&refresh);
+    let content_toolbar = adw::ToolbarView::new();
+    content_toolbar.add_top_bar(&content_header);
+    content_toolbar.set_content(Some(&scroll));
+    content_toolbar.add_bottom_bar(&status_bar);
+    let content_page = adw::NavigationPage::new(&content_toolbar, PAGES[0]);
+    let sidebar_page = adw::NavigationPage::new(&side_toolbar, "ThinkHub");
+    let split = adw::NavigationSplitView::new();
+    split.set_sidebar(Some(&sidebar_page));
+    split.set_content(Some(&content_page));
+    split.set_min_sidebar_width(230.0);
+    split.set_max_sidebar_width(270.0);
+    window.set_content(Some(&split));
+    // Compact layout like GNOME Settings: below 600sp show the page list or a page, not both.
+    let compact = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        600.0,
+        adw::LengthUnit::Sp,
+    ));
+    compact.add_setter(&split, "collapsed", Some(&true.to_value()));
+    window.add_breakpoint(compact);
+    window.set_width_request(360);
+    // The divider belongs between the two panes; collapsed, the sidebar is the whole window.
+    let edge = side_toolbar.clone();
+    split.connect_collapsed_notify(move |split| {
+        if split.is_collapsed() {
+            edge.remove_css_class("sidebar-edge");
+            split.add_css_class("compact");
+        } else {
+            edge.add_css_class("sidebar-edge");
+            split.remove_css_class("compact");
+        }
+    });
+    // While collapsed the sidebar page is the only header, so it carries the window buttons.
+    split
+        .bind_property("collapsed", &side_header, "show-end-title-buttons")
+        .sync_create()
+        .build();
     let (tx, rx) = mpsc::channel();
     let ui = Rc::new(Ui {
         css,
@@ -178,6 +327,7 @@ fn build(app: &gtk::Application) {
         bios_spinner,
         tx,
         nav,
+        content_page,
     });
     let weak = Rc::downgrade(&ui);
     ui.window.connect_close_request(move |_|{
@@ -186,13 +336,95 @@ fn build(app: &gtk::Application) {
     });
     for (i, b) in ui.nav.iter().enumerate() {
         let weak = Rc::downgrade(&ui);
+        let split = split.clone();
+        let scroll = scroll.clone();
         b.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
                 ui.page.set(i);
                 ui.render();
+                // A new page starts at the top, as in GNOME Settings.
+                scroll.vadjustment().set_value(0.0);
+                split.set_show_content(true);
             }
         });
     }
+    // Window actions and their keyboard shortcuts.
+    let about = gio::SimpleAction::new("about", None);
+    let parent = ui.window.clone();
+    about.connect_activate(move |_, _| show_about(&parent));
+    let report_issue = gio::SimpleAction::new("report-issue", None);
+    report_issue.connect_activate(|_, _| open_link(&format!("{REPO_URL}/issues")));
+    ui.window.add_action(&report_issue);
+    let feedback_action = gio::SimpleAction::new("feedback", None);
+    let weak = Rc::downgrade(&ui);
+    feedback_action.connect_activate(move |_, _| {
+        if let Some(ui) = weak.upgrade() {
+            show_feedback(&ui);
+        }
+    });
+    ui.window.add_action(&feedback_action);
+    ui.window.add_action(&about);
+    let shortcuts = gio::SimpleAction::new("show-help-overlay", None);
+    let parent = ui.window.clone();
+    shortcuts.connect_activate(move |_, _| show_shortcuts(&parent));
+    ui.window.add_action(&shortcuts);
+    let search = gio::SimpleAction::new("search", None);
+    let (toggle, entry) = (search_toggle.clone(), search_entry.clone());
+    search.connect_activate(move |_, _| {
+        toggle.set_active(true);
+        entry.grab_focus();
+    });
+    ui.window.add_action(&search);
+    let refresh_action = gio::SimpleAction::new("refresh", None);
+    let button = refresh.clone();
+    refresh_action.connect_activate(move |_, _| button.emit_clicked());
+    ui.window.add_action(&refresh_action);
+    for (i, b) in ui.nav.iter().enumerate().take(FEEDBACK_PAGE) {
+        let action = gio::SimpleAction::new(&format!("page-{i}"), None);
+        let button = b.clone();
+        action.connect_activate(move |_, _| button.emit_clicked());
+        ui.window.add_action(&action);
+        app.set_accels_for_action(&format!("win.page-{i}"), &[&format!("<Alt>{}", i + 1)]);
+    }
+    app.set_accels_for_action("win.show-help-overlay", &["<Control>question"]);
+    app.set_accels_for_action("win.search", &["<Control>f"]);
+    app.set_accels_for_action("win.refresh", &["F5", "<Control>r"]);
+    app.set_accels_for_action("window.close", &["<Control>w", "<Control>q"]);
+    if let Some(directory) = std::env::var_os("THINKHUB_SHOTS") {
+        shots::run(
+            ui.clone(),
+            selftest::Handles {
+                app: app.clone(),
+                search_toggle: search_toggle.clone(),
+                search_entry: search_entry.clone(),
+                search_bar: search_bar.clone(),
+                split: split.clone(),
+            },
+            std::path::PathBuf::from(directory),
+        );
+    }
+    if std::env::var_os("THINKHUB_SELFTEST").is_some() {
+        selftest::run(
+            ui.clone(),
+            selftest::Handles {
+                app: app.clone(),
+                search_toggle: search_toggle.clone(),
+                search_entry: search_entry.clone(),
+                search_bar: search_bar.clone(),
+                split: split.clone(),
+            },
+        );
+    }
+    // Follow the desktop accent live while "System accent" is selected.
+    let weak = Rc::downgrade(&ui);
+    adw::StyleManager::default().connect_accent_color_notify(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            let value = ui.appearance.borrow();
+            if value.accent_source == appearance::AccentSource::System {
+                ui.css.load_from_data(&appearance_css(&value));
+            }
+        }
+    });
     let weak = Rc::downgrade(&ui);
     refresh.connect_clicked(move |_| {
         if let Some(ui) = weak.upgrade() {
@@ -229,7 +461,39 @@ fn build(app: &gtk::Application) {
         });
     }
     if let Some(directory) = std::env::var_os("THINKPAD_DASHBOARD_CAPTURE_DIR") {
-        ui.window.maximize();
+        // THINKHUB_CAPTURE_WIDTH renders the compact layout instead of a maximised window.
+        match std::env::var("THINKHUB_CAPTURE_WIDTH")
+            .ok()
+            .and_then(|w| w.parse::<i32>().ok())
+        {
+            Some(width) => ui.window.set_default_size(width, 800),
+            None => ui.window.maximize(),
+        }
+        if std::env::var_os("THINKHUB_CAPTURE_SIDEBAR").is_some() {
+            // Read-only: show the page list of the compact layout and render our own window.
+            let weak = Rc::downgrade(&ui);
+            let split = split.clone();
+            let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
+            let directory = std::path::PathBuf::from(&directory);
+            glib::timeout_add_local_once(Duration::from_secs(25), move || {
+                split.set_show_content(false);
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    let snapshot = gtk::Snapshot::new();
+                    paintable.snapshot(
+                        &snapshot,
+                        ui.window.width() as f64,
+                        ui.window.height() as f64,
+                    );
+                    if let (Some(node), Some(renderer)) = (snapshot.to_node(), ui.window.renderer()) {
+                        let _ = std::fs::create_dir_all(&directory);
+                        let _ = renderer
+                            .render_texture(&node, None)
+                            .save_to_png(directory.join("sidebar-compact.png"));
+                    }
+                });
+            });
+        }
         let weak = Rc::downgrade(&ui);
         let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
         let directory = std::path::PathBuf::from(directory);
@@ -337,11 +601,149 @@ fn build(app: &gtk::Application) {
     });
 }
 
+/// Inline field captions such as "Start %" must stay on one line.
+fn short_label(text: &str) -> gtk::Label {
+    let l = label(text, "muted");
+    l.set_wrap(false);
+    l
+}
+
+const FEEDBACK_PAGE: usize = 7;
+const PAGE_KEYWORDS: [&str; 8] = [
+    "system processor memory kernel graphics disk live status",
+    "battery charge health cycles capacity threshold charging",
+    "power profile fan temperature cooling thermal sensors",
+    "display brightness backlight keyboard thinklight trackpoint input devices",
+    "bios uefi fwupd lvfs update firmware",
+    "save preferences diagnostics capabilities blockers",
+    "appearance theme dark light accent colour color",
+    "bug report email feedback",
+];
+
+const REPO_URL: &str = "https://github.com/marioyordanov20039-debug/ThinkHub";
+const AUTHOR_URL: &str = "https://github.com/marioyordanov20039-debug";
+
+fn open_link(uri: &str) {
+    let _ = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>);
+}
+
+fn about_row(title: &str, subtitle: &str, icon: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .activatable(true)
+        .build();
+    if !subtitle.is_empty() {
+        row.set_subtitle(subtitle);
+    }
+    row.add_suffix(&gtk::Image::from_icon_name(icon));
+    row
+}
+
+fn show_about(parent: &adw::ApplicationWindow) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title("About ThinkHub");
+    dialog.set_content_width(400);
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    header.add_css_class("flat");
+    header.set_show_title(false);
+    toolbar.add_top_bar(&header);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    page.set_margin_start(24);
+    page.set_margin_end(24);
+    page.set_margin_bottom(24);
+    let icon = gtk::Image::from_icon_name(APP_ID);
+    icon.set_pixel_size(128);
+    page.append(&icon);
+    let name = gtk::Label::new(Some("ThinkHub"));
+    name.add_css_class("title-1");
+    page.append(&name);
+    let tagline = gtk::Label::new(Some(
+        "Your ThinkPad, at a glance: battery health, temperatures, fans and supported controls.",
+    ));
+    tagline.set_wrap(true);
+    tagline.set_justify(gtk::Justification::Center);
+    page.append(&tagline);
+    let version = gtk::Label::new(Some(&format!("Version {}", env!("CARGO_PKG_VERSION"))));
+    version.add_css_class("dim-label");
+    version.add_css_class("caption");
+    version.set_margin_bottom(12);
+    page.append(&version);
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    let author = about_row("Author", "marioyordanov20039-debug", "adw-external-link-symbolic");
+    author.connect_activated(|_| open_link(AUTHOR_URL));
+    list.append(&author);
+    let license = about_row("License", "MIT", "adw-external-link-symbolic");
+    license.connect_activated(|_| open_link(&format!("{REPO_URL}/blob/main/LICENSE")));
+    list.append(&license);
+    page.append(&list);
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(parent));
+}
+
+fn show_feedback(ui: &Rc<Ui>) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Send Feedback");
+    dialog.set_content_width(560);
+    dialog.set_content_height(680);
+    let form = feedback::page(&ui.window, ui.feedback.clone(), ui.data.borrow().clone());
+    form.set_margin_top(12);
+    form.set_margin_bottom(24);
+    form.set_margin_start(24);
+    form.set_margin_end(24);
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&form)
+        .build();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&scroll));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(&ui.window));
+}
+
+fn show_shortcuts(parent: &adw::ApplicationWindow) {
+    let dialog = adw::ShortcutsDialog::new();
+    let general = adw::ShortcutsSection::new(Some("General"));
+    for (title, accel) in [
+        ("Search", "<Control>f"),
+        ("Refresh live data", "F5"),
+        ("Keyboard Shortcuts", "<Control>question"),
+        ("Close window", "<Control>w"),
+    ] {
+        general.add(adw::ShortcutsItem::new(title, accel));
+    }
+    dialog.add(general);
+    let pages = adw::ShortcutsSection::new(Some("Pages"));
+    for (i, name) in PAGES.iter().enumerate().take(FEEDBACK_PAGE) {
+        pages.add(adw::ShortcutsItem::new(name, &format!("<Alt>{}", i + 1)));
+    }
+    dialog.add(pages);
+    dialog.present(Some(parent));
+}
+
+/// Maps ThinkHub's semantic label names onto Adwaita's type scale and colour classes.
+pub(crate) fn adwaita_class(class: &str) -> &str {
+    match class {
+        "muted" | "subtitle" => "dim-label",
+        "title" => "title-2",
+        "card-title" | "field" => "heading",
+        "status" => "caption",
+        "notice" => "warning",
+        other => other,
+    }
+}
+
 fn label(text: &str, class: &str) -> gtk::Label {
     let l = gtk::Label::new(Some(text));
     l.set_xalign(0.0);
     l.set_wrap(true);
     if !class.is_empty() {
+        let class = adwaita_class(class);
         l.add_css_class(class);
     }
     l
@@ -707,7 +1109,7 @@ impl Ui {
                 b.remove_css_class("selected");
             }
         }
-        self.content.append(&label(PAGES[self.page.get()], "title"));
+        self.content_page.set_title(PAGES[self.page.get()]);
         self.content.append(&label(
             match self.page.get() {
                 0 => "Your ThinkPad, at a glance.",
@@ -749,38 +1151,44 @@ impl Ui {
         }
     }
     fn card(&self, title: &str) -> gtk::Box {
-        let b = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        // GNOME-settings pattern: a small heading above a boxed group of rows.
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        section.append(&label(title, "heading"));
+        let b = gtk::Box::new(gtk::Orientation::Vertical, 0);
         b.add_css_class("card");
-        b.append(&label(title, "card-title"));
-        self.content.append(&b);
+        section.append(&b);
+        self.content.append(&section);
         b
     }
     fn note(&self, parent: &gtk::Box, text: &str) {
         parent.append(&label(text, "muted"));
     }
-    fn row(&self, parent: &gtk::Box, name: &str, value: &str) {
+    fn make_row(&self, parent: &gtk::Box, name: &str, value: &str) -> gtk::Label {
+        if parent.last_child().is_some_and(|w| w.has_css_class("row")) {
+            parent.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 20);
         row.add_css_class("row");
-        let key = label(name, "muted");
-        key.set_width_request(155);
-        let val = label(value, "");
+        let key = label(name, "");
+        key.set_wrap(false);
+        key.set_valign(gtk::Align::Center);
+        // The value takes the remaining width, right-aligned, and wraps only when it must.
+        let val = label(value, "dim-label");
         val.set_selectable(true);
         val.set_hexpand(true);
+        val.set_xalign(1.0);
+        val.set_justify(gtk::Justification::Right);
+        val.set_valign(gtk::Align::Center);
         row.append(&key);
         row.append(&val);
         parent.append(&row);
+        val
+    }
+    fn row(&self, parent: &gtk::Box, name: &str, value: &str) {
+        self.make_row(parent, name, value);
     }
     fn bound(&self, parent: &gtk::Box, name: &str, format: impl Fn(&Value) -> String + 'static) {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 20);
-        row.add_css_class("row");
-        let key = label(name, "muted");
-        key.set_width_request(155);
-        let val = label(&format(&self.data.borrow()), "");
-        val.set_selectable(true);
-        val.set_hexpand(true);
-        row.append(&key);
-        row.append(&val);
-        parent.append(&row);
+        let val = self.make_row(parent, name, &format(&self.data.borrow()));
         self.bindings.borrow_mut().push((val, Box::new(format)));
     }
     fn path(&self, parent: &gtk::Box, name: &str, pointer: &str) {
@@ -1035,9 +1443,9 @@ impl Ui {
                 a.set_value(start as f64);
                 let z = gtk::SpinButton::with_range(1., 100., 1.);
                 z.set_value(end as f64);
-                controls.append(&label("Start %", "muted"));
+                controls.append(&short_label("Start %"));
                 controls.append(&a);
-                controls.append(&label("Stop %", "muted"));
+                controls.append(&short_label("Stop %"));
                 controls.append(&z);
                 card.append(&controls);
                 let sample =
@@ -1088,12 +1496,18 @@ impl Ui {
                 ),
             );
         }
+        let profile_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        profile_group.add_css_class("linked");
+        profile_group.set_halign(gtk::Align::Start);
+        let has_profiles = !profiles.is_empty();
         for profile in profiles {
             let b = gtk::Button::with_label(&profile);
-            b.set_halign(gtk::Align::Start);
             let weak = Rc::downgrade(self);
             b.connect_clicked(move |_|if let Some(ui)=weak.upgrade(){ui.dialog("Change power profile",&format!("Switch to {profile}? The power service will check for active holds and policy restrictions."),Some(vec!["power".into(),"set".into(),profile.clone()]));});
-            card.append(&b);
+            profile_group.append(&b);
+        }
+        if has_profiles {
+            card.append(&profile_group);
         }
         self.bound(&card, "Active holds", |v| {
             serde_json::to_string(&v["power"]["state"]["holds"]).unwrap_or_default()
@@ -1448,7 +1862,7 @@ impl Ui {
     }
     fn set_appearance(&self, value: appearance::Appearance, feedback: &gtk::Label) {
         configure_theme(value.theme);
-        self.css.load_from_data(&value.css());
+        self.css.load_from_data(&appearance_css(&value));
         *self.appearance.borrow_mut() = value.clone();
         match appearance::path().and_then(|p| appearance::save(&p, &value)) {
             Ok(()) => {
@@ -1504,7 +1918,18 @@ impl Ui {
             "Choose the appearance for ThinkHub. Your desktop theme stays as it is.",
         );
         let card = self.card("Accent color");
-        self.note(&card,"Use a preset, or pick any custom color. Buttons, highlights and focus indicators update together.");
+        self.note(&card,"Follow your desktop's accent color, or choose your own. Buttons and highlights update together.");
+        let source_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        source_row.add_css_class("linked");
+        source_row.set_halign(gtk::Align::Start);
+        let system_accent = gtk::ToggleButton::with_label("System accent");
+        let custom_accent = gtk::ToggleButton::with_label("Custom accent");
+        custom_accent.set_group(Some(&system_accent));
+        system_accent.set_active(current.accent_source == appearance::AccentSource::System);
+        custom_accent.set_active(current.accent_source == appearance::AccentSource::Custom);
+        source_row.append(&system_accent);
+        source_row.append(&custom_accent);
+        card.append(&source_row);
         let names: Vec<&str> = appearance::PRESETS
             .iter()
             .map(|(name, _)| *name)
@@ -1529,6 +1954,30 @@ impl Ui {
         let color = label(&current.accent, "accent");
         custom.append(&color);
         card.append(&custom);
+        let custom_enabled = current.accent_source == appearance::AccentSource::Custom;
+        presets.set_sensitive(custom_enabled);
+        custom.set_sensitive(custom_enabled);
+        for (button, source) in [
+            (&system_accent, appearance::AccentSource::System),
+            (&custom_accent, appearance::AccentSource::Custom),
+        ] {
+            let weak = Rc::downgrade(self);
+            let feedback_copy = feedback.clone();
+            let (presets, custom) = (presets.clone(), custom.clone());
+            button.connect_toggled(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                if let Some(ui) = weak.upgrade() {
+                    let mut value = ui.appearance.borrow().clone();
+                    value.accent_source = source;
+                    let custom_on = source == appearance::AccentSource::Custom;
+                    presets.set_sensitive(custom_on);
+                    custom.set_sensitive(custom_on);
+                    ui.set_appearance(value, &feedback_copy);
+                }
+            });
+        }
         let weak = Rc::downgrade(self);
         let feedback_copy = feedback.clone();
         let picker_copy = picker.downgrade();
@@ -1620,9 +2069,9 @@ impl Ui {
             start.set_value(saved["start"].as_f64().unwrap_or(75.));
             let end = gtk::SpinButton::with_range(1., 100., 1.);
             end.set_value(saved["end"].as_f64().unwrap_or(80.));
-            row.append(&label("Start %", "muted"));
+            row.append(&short_label("Start %"));
             row.append(&start);
-            row.append(&label("Stop %", "muted"));
+            row.append(&short_label("Stop %"));
             row.append(&end);
             row.set_sensitive(enabled.is_active());
             let weak = row.downgrade();
