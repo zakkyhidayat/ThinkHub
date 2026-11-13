@@ -41,6 +41,26 @@ tested physical model or installed distro.
 
 Raw local reports are generated under `reports/` and excluded from Git. They are never uploaded.
 
+## Fork verification: ThinkPad X13 Gen 2i on Solus
+
+The table above is the original author's T480/CachyOS record. The fork's libadwaita interface and Solus
+package were checked separately on 2026-11-13. Only read-only paths were exercised.
+
+| Item | Result |
+| --- | --- |
+| Model | Lenovo ThinkPad X13 Gen 2i (Intel Core i5-1145G7, 15.3 GiB RAM, Intel i915 graphics, one NVMe drive) |
+| OS / session | Solus 4.9 Serenity, kernel 7.2.15-371.current, GNOME session on Wayland |
+| Toolkit | Rust 1.98, GTK 4.24.1, libadwaita 1.10.0 |
+| Read-only backend | `scan`, `capabilities`, `overview`, `doctor`, `power show`, `status`, `monitor`, `battery presets`, `firmware bios`, `firmware scan`, `devices` and the change previews all succeeded without root; invalid input was rejected |
+| Battery | One battery (BAT0); charge, health (about 75%) and 345 cycles read; threshold and charge-mode interfaces detected, previews validated, no writes |
+| Sensors / fan | `thinkpad`, `coretemp`, `nvme` and `iwlwifi` temperature sensors and the fan discovered dynamically |
+| Display / input | Backlight, ThinkLight, TrackPoint, touchpad and keyboards discovered; controls opened and cancelled, nothing applied |
+| Power service | power-profiles-daemon detected as active; TLP, tuned and Vantage reported inactive |
+| Interface | 10 GUI tests and a 35-check self-test (`THINKHUB_SELFTEST=1`) passed, including the real desktop accent color, light/dark, compact layout, menu and dialogs |
+| Packaging | `.eopkg` built with `solbuild` in a clean Solus chroot (75 backend and 10 GUI tests ran in the check step), installed and launched |
+| Not tested | Hardware writes, administrator authorization, BIOS preparation or flashing, firmware catalog refresh, other Solus releases and other models |
+
+
 ## Simulated hardware tests
 
 75 core tests and nine GUI tests passed across library and integration tests. Cases include dual energy-based batteries,

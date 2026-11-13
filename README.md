@@ -13,7 +13,9 @@ ThinkHub brings battery health, temperatures, fan speed, hardware information an
   <img src="docs/images/overview-dark.png" width="48%" alt="ThinkHub Overview, dark theme">
 </p>
 
-**Public preview — v0.5.1-preview.1.** Tested locally on a ThinkPad T480 running CachyOS. Support depends on the model, Linux kernel, firmware and installed services. This release does **not** promise that every feature works on every ThinkPad. See the [compatibility record](docs/COMPATIBILITY.md).
+<p align="center"><sub>Screenshots: ThinkPad X13 Gen 2i, Solus 4.9, GTK 4.24 and libadwaita 1.10. The original release was photographed on a ThinkPad T480 with CachyOS.</sub></p>
+
+**Public preview — v0.5.1-preview.1.** Tested locally by the original author on a ThinkPad T480 running CachyOS. This fork's libadwaita interface and Solus package were developed and checked on a ThinkPad X13 Gen 2i running Solus 4.9 (read-only checks; no hardware writes were tested there). Support depends on the model, Linux kernel, firmware and installed services. This release does **not** promise that every feature works on every ThinkPad. See the [compatibility record](docs/COMPATIBILITY.md).
 
 ## Download and install
 
